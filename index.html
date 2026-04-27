@@ -24,9 +24,12 @@
         <div class="bg-white p-8 rounded-[2rem] shadow-2xl text-center max-w-xs w-full mx-4">
             <h2 class="text-xl font-black text-indigo-600 uppercase mb-4 tracking-tighter">Budget Pro Login</h2>
             <p class="text-xs text-slate-400 font-bold mb-6 uppercase">Code eingeben</p>
-            <input type="password" id="access-code-input" class="w-full text-center text-2xl font-black tracking-[0.5em] border-b-2 border-indigo-100 outline-none focus:border-indigo-600 mb-6 py-2" maxlength="6">
-            <button onclick="checkAccessCode()" class="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold uppercase text-xs tracking-widest hover:bg-indigo-700 transition-all">Zugriff prüfen</button>
+            <input type="password" id="access-code-input" 
+                   class="w-full text-center text-2xl font-black tracking-[0.5em] border-b-2 border-indigo-100 outline-none focus:border-indigo-600 mb-6 py-2" 
+                   maxlength="6" autofocus onkeydown="if(event.key==='Enter') checkAccessCode()">
+            <button onclick="checkAccessCode()" id="login-btn" class="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold uppercase text-xs tracking-widest hover:bg-indigo-700 transition-all">Zugriff prüfen</button>
             <p id="auth-error" class="text-rose-500 text-[10px] font-bold mt-4 uppercase hidden">Falscher Code</p>
+            <p id="auth-loading" class="text-slate-400 text-[10px] font-bold mt-4 uppercase hidden">Initialisierung...</p>
         </div>
     </div>
 
@@ -42,7 +45,7 @@
     <header class="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex justify-between items-center no-print">
         <div>
             <h1 class="text-xl font-black tracking-tighter text-indigo-600 uppercase">BUDGET PRO</h1>
-            <p id="status-text" class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Cloud-Speicherung Aktiv</p>
+            <p id="status-text" class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Warten auf Login...</p>
         </div>
         <div class="flex gap-2">
             <button onclick="window.print()" class="p-2 bg-slate-100 rounded-lg hover:bg-slate-200">
@@ -132,7 +135,7 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Firebase Config (Runtime bereitgestellt)
+        // Firebase Config
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -143,6 +146,7 @@
         let state = null;
         let archive = [];
         let saveTimeout = null;
+        let isInitialized = false;
 
         const defaultState = {
             income: { me: 5500, spouse: 0 },
@@ -164,48 +168,73 @@
         };
 
         // Zugriffscode Prüfung
-        window.checkAccessCode = () => {
+        window.checkAccessCode = async () => {
             const input = document.getElementById('access-code-input').value;
             const error = document.getElementById('auth-error');
+            const loading = document.getElementById('auth-loading');
+            const loginBtn = document.getElementById('login-btn');
+
             if (input === '160123') {
-                document.getElementById('auth-overlay').classList.add('hidden');
-                document.getElementById('app-content').classList.remove('opacity-0');
-                initApp();
+                error.classList.add('hidden');
+                loading.classList.remove('hidden');
+                loginBtn.disabled = true;
+                loginBtn.classList.add('opacity-50');
+
+                try {
+                    // Authentifizierung starten
+                    await signInAnonymously(auth);
+                    // Den Rest erledigt onAuthStateChanged
+                } catch (e) {
+                    console.error(e);
+                    error.innerText = "Verbindungsfehler";
+                    error.classList.remove('hidden');
+                    loading.classList.add('hidden');
+                    loginBtn.disabled = false;
+                }
             } else {
+                error.innerText = "Falscher Code";
                 error.classList.remove('hidden');
             }
         };
 
-        async function initApp() {
-            await signInAnonymously(auth);
-            onAuthStateChanged(auth, (user) => {
-                if (user) {
-                    loadData(user.uid);
-                    listenToArchive(user.uid);
-                }
-            });
-        }
+        // Firebase Auth Listener
+        onAuthStateChanged(auth, (user) => {
+            if (user && !isInitialized) {
+                isInitialized = true;
+                document.getElementById('auth-overlay').classList.add('hidden');
+                document.getElementById('app-content').classList.remove('opacity-0');
+                loadData(user.uid);
+                listenToArchive(user.uid);
+            }
+        });
 
         async function loadData(uid) {
             const plannerRef = doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current');
-            const snap = await getDoc(plannerRef);
-            if (snap.exists()) {
-                state = snap.data();
-            } else {
+            try {
+                const snap = await getDoc(plannerRef);
+                if (snap.exists()) {
+                    state = snap.data();
+                } else {
+                    state = JSON.parse(JSON.stringify(defaultState));
+                    await setDoc(plannerRef, state);
+                }
+                renderPlanner();
+                document.getElementById('status-text').innerText = "Cloud-Synchronisation bereit";
+            } catch (e) {
+                console.error("Daten laden fehlgeschlagen:", e);
                 state = JSON.parse(JSON.stringify(defaultState));
-                await setDoc(plannerRef, state);
+                renderPlanner();
             }
-            renderPlanner();
         }
 
         function listenToArchive(uid) {
             const archiveRef = collection(db, 'artifacts', appId, 'users', uid, 'archive');
             onSnapshot(archiveRef, (snap) => {
                 archive = snap.docs.map(d => ({ ...d.data(), id: d.id }));
-                if (document.getElementById('view-archive').classList.contains('hidden') === false) {
+                if (!document.getElementById('view-archive').classList.contains('hidden')) {
                     renderArchive();
                 }
-            }, (err) => console.error(err));
+            }, (err) => console.error("Archiv-Fehler:", err));
         }
 
         window.debouncedSave = () => {
@@ -218,13 +247,17 @@
             if (!auth.currentUser || !state) return;
             const uid = auth.currentUser.uid;
             
-            // UI Werte in State übertragen
             state.income.me = parseFloat(document.getElementById('inc-me').value) || 0;
             state.income.spouse = parseFloat(document.getElementById('inc-spouse').value) || 0;
 
             const plannerRef = doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current');
-            await setDoc(plannerRef, state);
-            document.getElementById('status-text').innerText = "Gespeichert " + new Date().toLocaleTimeString();
+            try {
+                await setDoc(plannerRef, state);
+                document.getElementById('status-text').innerText = "Gespeichert " + new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error("Speichern fehlgeschlagen:", e);
+                document.getElementById('status-text').innerText = "Fehler beim Speichern!";
+            }
         }
 
         window.switchTab = (tab) => {
@@ -350,7 +383,6 @@
 
             await setDoc(doc(db, 'artifacts', appId, 'users', uid, 'archive', archiveId), archiveEntry);
             
-            // Reset Planner in Cloud
             state = JSON.parse(JSON.stringify(defaultState));
             await setDoc(doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current'), state);
             
