@@ -14,6 +14,9 @@
         .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 10000; align-items: center; justify-content: center; padding: 20px; }
         .modal.active { display: flex; }
         input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        
+        /* Sicherstellen, dass die App sichtbar ist wenn die Klasse entfernt wird */
+        #app-container:not(.hidden) { display: block !important; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
@@ -52,7 +55,7 @@
         <header class="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex justify-between items-center">
             <div>
                 <h1 class="text-xl font-black tracking-tighter text-indigo-600 uppercase">BUDGET PRO</h1>
-                <p id="status-text" class="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Initialisierung...</p>
+                <p id="status-text" class="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Bereit</p>
             </div>
             <button onclick="window.print()" class="p-2.5 bg-slate-100 rounded-xl text-slate-600 hover:bg-slate-200">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
@@ -171,17 +174,23 @@
             variableCosts: []
         };
 
-        // Sofortiger Check ohne Cloud-Warten
+        // SOFORTIGE REAKTION - KEINE WARTEZEIT AUF CLOUD
         window.checkAccessCode = () => {
             const input = document.getElementById('access-code-input').value;
             const error = document.getElementById('auth-error');
+            const overlay = document.getElementById('auth-overlay');
+            const appContainer = document.getElementById('app-container');
             
             if (input === '160123') {
-                // ERFOLG: Sofortiges Freischalten der UI
-                document.getElementById('auth-overlay').style.display = 'none';
-                document.getElementById('app-container').classList.remove('hidden');
+                // UI SOFORT UMSCHALTEN
+                overlay.style.display = 'none';
+                appContainer.classList.remove('hidden');
                 
-                // Jetzt erst Cloud-Init im Hintergrund
+                // Backup-Initialisierung falls Firebase hakt
+                state = JSON.parse(JSON.stringify(defaultState));
+                renderPlanner();
+                
+                // Im Hintergrund Cloud versuchen
                 initCloud();
             } else {
                 error.classList.remove('hidden');
@@ -189,62 +198,63 @@
             }
         };
 
-        // Enter-Taste für Login
         document.getElementById('access-code-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') checkAccessCode();
         });
 
         async function initCloud() {
             try {
+                // Nur ausführen wenn auth verfügbar
                 await signInAnonymously(auth);
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
-                        await loadUserData(user.uid);
+                        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'planner', 'current');
+                        const snap = await getDoc(docRef);
+                        if (snap.exists()) {
+                            state = snap.data();
+                            renderPlanner();
+                        } else {
+                            await setDoc(docRef, state);
+                        }
                         startArchiveListener(user.uid);
+                        document.getElementById('status-text').innerText = "Cloud Aktiv";
                     }
                 });
             } catch (e) {
-                console.error("Cloud-Init Fehler", e);
-                // Fallback: Mit Standarddaten arbeiten falls Cloud blockiert
-                state = JSON.parse(JSON.stringify(defaultState));
-                renderPlanner();
-                document.getElementById('status-text').innerText = "Offline-Modus";
+                console.warn("Cloud-Dienste eingeschränkt, arbeite lokal weiter.");
+                document.getElementById('status-text').innerText = "Lokal (Offline)";
             }
-        }
-
-        async function loadUserData(uid) {
-            const docRef = doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current');
-            const snap = await getDoc(docRef);
-            if (snap.exists()) {
-                state = snap.data();
-            } else {
-                state = JSON.parse(JSON.stringify(defaultState));
-                await setDoc(docRef, state);
-            }
-            renderPlanner();
-            document.getElementById('status-text').innerText = "Cloud Synchronisiert";
         }
 
         function startArchiveListener(uid) {
-            const colRef = collection(db, 'artifacts', appId, 'users', uid, 'archive');
-            onSnapshot(colRef, (snap) => {
-                archive = snap.docs.map(d => ({ ...d.data(), id: d.id }));
-                if (!document.getElementById('view-archive').classList.contains('hidden')) renderArchive();
-            });
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'users', uid, 'archive');
+                onSnapshot(colRef, (snap) => {
+                    archive = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+                    if (!document.getElementById('view-archive').classList.contains('hidden')) renderArchive();
+                }, (err) => console.log("Archive sync blocked"));
+            } catch(e) {}
         }
 
         window.debouncedSave = () => {
             updateCalculations();
             if (saveTimeout) clearTimeout(saveTimeout);
             saveTimeout = setTimeout(() => {
-                if (auth.currentUser && state) {
+                const incMe = parseFloat(document.getElementById('inc-me').value) || 0;
+                const incSp = parseFloat(document.getElementById('inc-spouse').value) || 0;
+                state.income.me = incMe;
+                state.income.spouse = incSp;
+
+                if (auth.currentUser) {
                     const uid = auth.currentUser.uid;
-                    state.income.me = parseFloat(document.getElementById('inc-me').value) || 0;
-                    state.income.spouse = parseFloat(document.getElementById('inc-spouse').value) || 0;
-                    setDoc(doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current'), state);
-                    document.getElementById('status-text').innerText = "Gespeichert " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    setDoc(doc(db, 'artifacts', appId, 'users', uid, 'planner', 'current'), state)
+                        .then(() => {
+                            document.getElementById('status-text').innerText = "Gespeichert " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                        }).catch(() => {
+                            document.getElementById('status-text').innerText = "Lokal gespeichert";
+                        });
                 }
-            }, 1500);
+            }, 1000);
         };
 
         function renderPlanner() {
@@ -268,11 +278,11 @@
             div.className = 'flex flex-col p-4 bg-slate-50 rounded-2xl border border-slate-100 group';
             div.innerHTML = `
                 <div class="flex justify-between items-center mb-3">
-                    <input type="text" value="${item.name}" onchange="updateRow('${type}', ${index}, 'name', this.value)" 
+                    <input type="text" value="${item.name || ''}" onchange="updateRow('${type}', ${index}, 'name', this.value)" 
                            class="bg-transparent text-xs font-bold outline-none flex-grow placeholder-slate-300" placeholder="Bezeichnung">
                     <div class="flex items-center gap-1 font-black">
                         <span class="text-[10px] opacity-20 uppercase">CHF</span>
-                        <input type="number" value="${item.amount}" oninput="updateRow('${type}', ${index}, 'amount', this.value)" 
+                        <input type="number" value="${item.amount || 0}" oninput="updateRow('${type}', ${index}, 'amount', this.value)" 
                                class="bg-transparent text-right w-20 outline-none text-xs">
                     </div>
                 </div>
@@ -322,8 +332,8 @@
             const incMe = parseFloat(document.getElementById('inc-me').value) || 0;
             const incSp = parseFloat(document.getElementById('inc-spouse').value) || 0;
             const totalInc = incMe + incSp;
-            const totalFixed = state.fixedCosts.reduce((s, i) => s + (i.amount || 0), 0);
-            const totalVari = state.variableCosts.reduce((s, i) => s + (i.amount || 0), 0);
+            const totalFixed = state.fixedCosts.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+            const totalVari = state.variableCosts.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
             const totalExp = totalFixed + totalVari;
 
             const f = (v) => new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF' }).format(v);
@@ -341,10 +351,10 @@
         };
 
         window.archiveCurrentMonth = async () => {
-            if (!confirm("Monat wirklich abschliessen und archivieren?") || !auth.currentUser) return;
+            if (!confirm("Monat wirklich abschliessen?") || !auth.currentUser) return;
             const month = new Intl.DateTimeFormat('de-CH', { month: 'long', year: 'numeric' }).format(new Date());
             const inc = (parseFloat(document.getElementById('inc-me').value) || 0) + (parseFloat(document.getElementById('inc-spouse').value) || 0);
-            const exp = state.fixedCosts.reduce((s,i)=>s+i.amount,0) + state.variableCosts.reduce((s,i)=>s+i.amount,0);
+            const exp = state.fixedCosts.reduce((s,i)=>s+(parseFloat(i.amount)||0),0) + state.variableCosts.reduce((s,i)=>s+(parseFloat(i.amount)||0),0);
             
             const archData = {
                 ...state,
@@ -353,19 +363,21 @@
                 timestamp: Date.now()
             };
 
-            await setDoc(doc(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'archive', "m_" + Date.now()), archData);
-            state.variableCosts = []; // Nur variable Kosten leeren
-            await setDoc(doc(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'planner', 'current'), state);
-            alert("Erfolgreich archiviert!");
-            renderPlanner();
-            switchTab('archive');
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'archive', "m_" + Date.now()), archData);
+                state.variableCosts = [];
+                await setDoc(doc(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'planner', 'current'), state);
+                alert("Archiviert!");
+                renderPlanner();
+                switchTab('archive');
+            } catch(e) { alert("Archivierung fehlgeschlagen (Cloud-Error)"); }
         };
 
         function renderArchive() {
             const cont = document.getElementById('archive-list');
             cont.innerHTML = '';
             if (archive.length === 0) {
-                cont.innerHTML = `<div class="text-center py-20 text-slate-300 text-[10px] font-black uppercase tracking-widest">Keine Einträge im Archiv</div>`;
+                cont.innerHTML = `<div class="text-center py-20 text-slate-300 text-[10px] font-black uppercase tracking-widest">Archiv leer</div>`;
                 return;
             }
             archive.sort((a,b) => b.timestamp - a.timestamp).forEach(item => {
@@ -385,7 +397,7 @@
         }
 
         window.deleteArchive = async (id) => {
-            if (confirm("Eintrag unwiderruflich löschen?") && auth.currentUser) {
+            if (confirm("Löschen?") && auth.currentUser) {
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'archive', id));
             }
         };
