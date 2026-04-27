@@ -26,12 +26,12 @@ const App = () => {
   const [isEditMode, setIsEditMode] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState(null);
 
-  // State für Daten
+  // State für Daten mit deinen Fixkosten aus dem Screenshot
   const [income, setIncome] = useState({ me: '0', spouse: '0', other: '0' });
   const [fixedCosts, setFixedCosts] = useState([
     { name: 'Miete', amount: '2402' },
     { name: 'Auto', amount: '665' },
-    { name: 'Swisscom', amount: '179.80' },
+    { name: 'swisscom', amount: '179.80' },
     { name: 'Spende', amount: '10' },
     { name: 'Diganti', amount: '400' },
     { name: 'Lebensmittel', amount: '1500' },
@@ -40,7 +40,7 @@ const App = () => {
     { name: 'Krankenkasse Ajdin', amount: '165.45' },
     { name: 'Krankenkasse Elma', amount: '369.05' },
     { name: 'MediaMarkt', amount: '60' },
-    { name: 'CSS Abrechnung', amount: '0' },
+    { name: 'Leistungsabrechnung CSS', amount: '0' },
     { name: 'Steuer', amount: '99.60' }
   ]);
   const [variableCosts, setVariableCosts] = useState([]);
@@ -55,7 +55,9 @@ const App = () => {
       } catch (e) { console.error("Auth error", e); }
     };
     initAuth();
-    const unsub = onAuthStateChanged(auth, setUser);
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
     return () => unsub();
   }, []);
 
@@ -71,37 +73,43 @@ const App = () => {
         if (data.variableCosts) setVariableCosts(data.variableCosts);
       }
       setLoading(false);
-    }, (err) => console.error(err));
+    }, (err) => {
+        console.error("Firestore Error:", err);
+        setLoading(false);
+    });
 
     const historyRef = collection(db, 'artifacts', appId, 'users', user.uid, 'monthlyBudgets');
     const unsubHistory = onSnapshot(historyRef, (snap) => {
       const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setHistory(docs.sort((a, b) => b.id.localeCompare(a.id)));
-    }, (err) => console.error(err));
+    });
 
     return () => { unsubConfig(); unsubHistory(); };
   }, [user]);
 
-  // Auto-Save
+  // Auto-Save für den aktuellen Planer
   useEffect(() => {
     if (!user || loading || activeTab !== 'current') return;
     const timer = setTimeout(async () => {
       setIsSaving(true);
-      const configRef = doc(db, 'artifacts', appId, 'users', user.uid, 'budgetConfig', 'currentMonth');
-      await setDoc(configRef, { income, fixedCosts, variableCosts }, { merge: true });
+      try {
+        const configRef = doc(db, 'artifacts', appId, 'users', user.uid, 'budgetConfig', 'currentMonth');
+        await setDoc(configRef, { income, fixedCosts, variableCosts }, { merge: true });
+      } catch (e) { console.error("Save error", e); }
       setIsSaving(false);
-    }, 1000);
+    }, 1500);
     return () => clearTimeout(timer);
   }, [income, fixedCosts, variableCosts, user, loading, activeTab]);
 
-  const calc = (inc, fix, vari) => {
+  const calcTotals = (inc, fix, vari) => {
     const totalInc = Object.values(inc || {}).reduce((a, b) => a + Number(b || 0), 0);
     const totalFix = (fix || []).reduce((a, b) => a + Number(b.amount || 0), 0);
     const totalVari = (vari || []).reduce((a, b) => a + Number(b.amount || 0), 0);
-    return { totalInc, totalFix, totalVari, totalExp: totalFix + totalVari, saved: totalInc - (totalFix + totalVari) };
+    const totalExp = totalFix + totalVari;
+    return { totalInc, totalFix, totalVari, totalExp, saved: totalInc - totalExp };
   };
 
-  const totals = useMemo(() => calc(income, fixedCosts, variableCosts), [income, fixedCosts, variableCosts]);
+  const totals = useMemo(() => calcTotals(income, fixedCosts, variableCosts), [income, fixedCosts, variableCosts]);
 
   const handleFile = (e, index, type, isArchived = false) => {
     const file = e.target.files[0];
@@ -110,7 +118,7 @@ const App = () => {
     reader.onloadend = () => {
       const base64 = reader.result;
       if (isArchived) {
-        const updated = { ...selectedArchiveMonth };
+        const updated = JSON.parse(JSON.stringify(selectedArchiveMonth));
         if (type === 'fixed') updated.fixedCostsSnapshot[index].receipt = base64;
         else updated.variableCostsSnapshot[index].receipt = base64;
         setSelectedArchiveMonth(updated);
@@ -127,7 +135,7 @@ const App = () => {
 
   const saveArchiveEdit = async () => {
     if (!user || !selectedArchiveMonth) return;
-    const t = calc(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot);
+    const t = calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot);
     const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'monthlyBudgets', selectedArchiveMonth.id);
     await updateDoc(docRef, {
       ...selectedArchiveMonth,
@@ -150,126 +158,196 @@ const App = () => {
       incomeSnapshot: income, fixedCostsSnapshot: fixedCosts, variableCostsSnapshot: variableCosts,
       timestamp: new Date()
     });
-    setVariableCosts(variableCosts.map(v => ({ ...v, amount: '', receipt: null })));
-    alert("Archiviert!");
+    setVariableCosts([]);
+    alert("Monat erfolgreich archiviert!");
   };
 
-  if (loading) return <div className="p-10 text-center font-bold">Lade App...</div>;
+  if (loading) return (
+    <div className="flex items-center justify-center min-h-screen font-sans">
+      <div className="text-center space-y-4">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+        <p className="font-bold text-slate-500">Budget Pro wird geladen...</p>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 pb-20">
-      <header className="bg-white border-b sticky top-0 z-50 p-4 flex justify-between items-center shadow-sm">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
+      {/* App Header */}
+      <header className="bg-white border-b sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
         <div>
-          <h1 className="text-lg font-black tracking-tighter text-indigo-600">BUDGET PRO</h1>
-          <p className="text-[10px] text-slate-400 font-bold uppercase">{isSaving ? 'Speichert...' : 'Synchronisiert'}</p>
+          <h1 className="text-xl font-black tracking-tighter text-indigo-600">BUDGET PRO</h1>
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isSaving ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`}></div>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">
+              {isSaving ? 'Speichert...' : 'Cloud Synchronisiert'}
+            </p>
+          </div>
         </div>
-        <button onClick={() => window.print()} className="p-2 bg-slate-100 rounded-full">
-           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        <button onClick={() => window.print()} className="p-2.5 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors">
+           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
         </button>
       </header>
 
-      <main className="max-w-xl mx-auto p-4 space-y-4">
+      <main className="max-w-2xl mx-auto p-4 space-y-6">
         {activeTab === 'current' && !selectedArchiveMonth && (
-          <div className="space-y-4">
-            {/* Header Karte */}
-            <div className="bg-indigo-600 text-white p-6 rounded-3xl shadow-lg">
-              <p className="text-[10px] font-bold opacity-60 uppercase tracking-widest">Restbudget</p>
-              <h2 className="text-3xl font-black">{formatCurrency(totals.saved)}</h2>
-              <div className="flex justify-between mt-4 pt-4 border-t border-white/20 text-xs">
-                <span>Einnahmen: {formatCurrency(totals.totalInc)}</span>
-                <span>Ausgaben: {formatCurrency(totals.totalExp)}</span>
+          <>
+            {/* Dashboard Karte */}
+            <div className="bg-indigo-600 text-white p-8 rounded-[2.5rem] shadow-2xl shadow-indigo-200 relative overflow-hidden">
+              <div className="relative z-10">
+                <p className="text-xs font-bold opacity-70 uppercase tracking-[0.2em] mb-1">Verfügbarer Rest</p>
+                <h2 className="text-4xl font-black mb-6">{formatCurrency(totals.saved)}</h2>
+                <div className="grid grid-cols-2 gap-4 pt-6 border-t border-white/20">
+                  <div>
+                    <p className="text-[10px] uppercase font-bold opacity-60">Einnahmen</p>
+                    <p className="font-bold text-sm">{formatCurrency(totals.totalInc)}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase font-bold opacity-60">Gesamtausgaben</p>
+                    <p className="font-bold text-sm">{formatCurrency(totals.totalExp)}</p>
+                  </div>
+                </div>
               </div>
+              <div className="absolute top-[-20%] right-[-10%] w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
             </div>
 
-            {/* Sektionen */}
-            <div className="bg-white rounded-2xl p-4 border border-slate-200">
-               <h3 className="text-[10px] font-black uppercase text-slate-400 mb-3">Einnahmen</h3>
-               <div className="space-y-2">
+            {/* Einnahmen */}
+            <section className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
+               <h3 className="text-xs font-black uppercase text-slate-400 mb-4 flex items-center gap-2">
+                 <span className="w-1.5 h-4 bg-emerald-400 rounded-full"></span> Einnahmen
+               </h3>
+               <div className="space-y-3">
                   <InputRow label="Mein Lohn" val={income.me} set={v => setIncome({...income, me: v})} />
                   <InputRow label="Partner" val={income.spouse} set={v => setIncome({...income, spouse: v})} />
-                  <InputRow label="Bonus/Anderes" val={income.other} set={v => setIncome({...income, other: v})} />
+                  <InputRow label="Sonstiges" val={income.other} set={v => setIncome({...income, other: v})} />
                </div>
-            </div>
+            </section>
 
-            <CostBox title="Fixkosten" items={fixedCosts} setItems={setFixedCosts} onFile={(e, i) => handleFile(e, i, 'fixed')} onView={setSelectedReceipt} />
-            <CostBox title="Variable Kosten" items={variableCosts} setItems={setVariableCosts} onFile={(e, i) => handleFile(e, i, 'variable')} onView={setSelectedReceipt} />
+            {/* Ausgaben Sektionen */}
+            <CostBox title="Fixkosten" items={fixedCosts} setItems={setFixedCosts} onFile={(e, i) => handleFile(e, i, 'fixed')} onView={setSelectedReceipt} color="indigo" />
+            <CostBox title="Variable Ausgaben" items={variableCosts} setItems={setVariableCosts} onFile={(e, i) => handleFile(e, i, 'variable')} onView={setSelectedReceipt} color="rose" />
 
-            <button onClick={finalizeMonth} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl">
-              Monat abschliessen
+            <button onClick={finalizeMonth} className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-transform">
+              Monat abschliessen & Archivieren
             </button>
-          </div>
+          </>
         )}
 
         {activeTab === 'yearly' && !selectedArchiveMonth && (
-          <div className="space-y-3">
-            {history.map(m => (
-              <div key={m.id} onClick={() => setSelectedArchiveMonth(m)} className="bg-white p-4 rounded-2xl border border-slate-200 flex justify-between items-center cursor-pointer hover:border-indigo-500 transition-all">
-                <div>
-                  <h4 className="font-black text-sm">{m.month}</h4>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase">Ausgaben: {formatCurrency(m.totalExpenses)}</p>
+          <div className="space-y-4">
+            <h2 className="text-xl font-black px-2">Verlauf</h2>
+            {history.length === 0 ? (
+                <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300">
+                    <p className="text-slate-400 font-bold">Noch keine archivierten Monate.</p>
                 </div>
-                <div className="text-right">
-                  <span className={`text-sm font-black ${m.savedAmount >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>{formatCurrency(m.savedAmount)}</span>
-                  <p className="text-[8px] font-bold text-slate-400 uppercase">Bilanz</p>
-                </div>
-              </div>
-            ))}
+            ) : (
+                history.map(m => (
+                    <div key={m.id} onClick={() => setSelectedArchiveMonth(m)} className="bg-white p-5 rounded-2xl border border-slate-200 flex justify-between items-center cursor-pointer hover:border-indigo-500 hover:shadow-md transition-all group">
+                      <div>
+                        <h4 className="font-black text-slate-800 group-hover:text-indigo-600 transition-colors">{m.month}</h4>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ausgaben: {formatCurrency(m.totalExpenses)}</p>
+                      </div>
+                      <div className="text-right">
+                        <span className={`text-base font-black ${m.savedAmount >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{formatCurrency(m.savedAmount)}</span>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Bilanz</p>
+                      </div>
+                    </div>
+                  ))
+            )}
           </div>
         )}
 
+        {/* Archiv Detailansicht */}
         {selectedArchiveMonth && (
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 space-y-6">
+          <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <div className="flex justify-between items-center">
-              <button onClick={() => { setSelectedArchiveMonth(null); setIsEditMode(false); }} className="text-[10px] font-black uppercase text-slate-400">← Zurück</button>
+              <button onClick={() => { setSelectedArchiveMonth(null); setIsEditMode(false); }} className="px-4 py-2 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-500 hover:bg-slate-200">← Zurück</button>
               <div className="flex gap-2">
-                <button onClick={() => setIsEditMode(!isEditMode)} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-lg text-[10px] font-black uppercase">{isEditMode ? 'Abbrechen' : 'Bearbeiten'}</button>
-                {isEditMode && <button onClick={saveArchiveEdit} className="px-3 py-1 bg-emerald-500 text-white rounded-lg text-[10px] font-black uppercase">Speichern</button>}
+                <button onClick={() => setIsEditMode(!isEditMode)} className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-black uppercase">
+                    {isEditMode ? 'Abbrechen' : 'Bearbeiten'}
+                </button>
+                {isEditMode && (
+                    <button onClick={saveArchiveEdit} className="px-4 py-2 bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-100">
+                        Speichern
+                    </button>
+                )}
               </div>
             </div>
 
             <div>
-              <h2 className="text-2xl font-black tracking-tighter italic">{selectedArchiveMonth.month}</h2>
-              <div className="grid grid-cols-2 gap-2 mt-4">
-                <div className="bg-slate-50 p-3 rounded-xl">
-                  <p className="text-[8px] font-black text-slate-400 uppercase">Gespart</p>
-                  <p className="text-sm font-black text-emerald-500">{formatCurrency(calc(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).saved)}</p>
+              <h2 className="text-3xl font-black tracking-tighter italic text-slate-800">{selectedArchiveMonth.month}</h2>
+              <div className="grid grid-cols-2 gap-3 mt-6">
+                <div className="bg-emerald-50 p-4 rounded-2xl">
+                  <p className="text-[10px] font-black text-emerald-600 uppercase mb-1">Gespart</p>
+                  <p className="text-lg font-black text-emerald-700">
+                    {formatCurrency(calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).saved)}
+                  </p>
                 </div>
-                <div className="bg-slate-50 p-3 rounded-xl">
-                  <p className="text-[8px] font-black text-slate-400 uppercase">Ausgaben</p>
-                  <p className="text-sm font-black text-red-500">{formatCurrency(calc(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).totalExp)}</p>
+                <div className="bg-rose-50 p-4 rounded-2xl">
+                  <p className="text-[10px] font-black text-rose-600 uppercase mb-1">Ausgaben</p>
+                  <p className="text-lg font-black text-rose-700">
+                    {formatCurrency(calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).totalExp)}
+                  </p>
                 </div>
               </div>
             </div>
 
-            <div className="space-y-4">
-               <ArchiveList title="Fixkosten" list={selectedArchiveMonth.fixedCostsSnapshot} isEdit={isEditMode} onUpdate={(i, k, v) => {
-                 const upd = {...selectedArchiveMonth}; upd.fixedCostsSnapshot[i][k] = v; setSelectedArchiveMonth(upd);
-               }} onFile={(e, i) => handleFile(e, i, 'fixed', true)} onView={setSelectedReceipt} />
+            <div className="space-y-6">
+               <ArchiveList 
+                 title="Fixkosten Detail" 
+                 list={selectedArchiveMonth.fixedCostsSnapshot} 
+                 isEdit={isEditMode} 
+                 onUpdate={(i, k, v) => {
+                    const upd = JSON.parse(JSON.stringify(selectedArchiveMonth));
+                    upd.fixedCostsSnapshot[i][k] = v;
+                    setSelectedArchiveMonth(upd);
+                 }} 
+                 onFile={(e, i) => handleFile(e, i, 'fixed', true)} 
+                 onView={setSelectedReceipt} 
+               />
                
-               <ArchiveList title="Variable Kosten" list={selectedArchiveMonth.variableCostsSnapshot} isEdit={isEditMode} onUpdate={(i, k, v) => {
-                 const upd = {...selectedArchiveMonth}; upd.variableCostsSnapshot[i][k] = v; setSelectedArchiveMonth(upd);
-               }} onFile={(e, i) => handleFile(e, i, 'variable', true)} onView={setSelectedReceipt} />
+               <ArchiveList 
+                 title="Variable Kosten Detail" 
+                 list={selectedArchiveMonth.variableCostsSnapshot} 
+                 isEdit={isEditMode} 
+                 onUpdate={(i, k, v) => {
+                    const upd = JSON.parse(JSON.stringify(selectedArchiveMonth));
+                    upd.variableCostsSnapshot[i][k] = v;
+                    setSelectedArchiveMonth(upd);
+                 }} 
+                 onFile={(e, i) => handleFile(e, i, 'variable', true)} 
+                 onView={setSelectedReceipt} 
+               />
             </div>
           </div>
         )}
       </main>
 
-      {/* Foto Viewer Overlay */}
+      {/* Beleg Viewer */}
       {selectedReceipt && (
-        <div className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-4" onClick={() => setSelectedReceipt(null)}>
-          <img src={selectedReceipt} className="max-w-full max-h-full rounded shadow-2xl" alt="Beleg" />
+        <div className="fixed inset-0 bg-slate-900/95 z-[100] flex items-center justify-center p-6 backdrop-blur-sm" onClick={() => setSelectedReceipt(null)}>
+          <div className="relative max-w-full max-h-full">
+            <img src={selectedReceipt} className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl border-4 border-white/10" alt="Beleg-Vorschau" />
+            <button className="absolute -top-12 right-0 text-white font-black uppercase text-xs">Schliessen ✕</button>
+          </div>
         </div>
       )}
 
       {/* Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t p-3 flex justify-around shadow-lg z-50">
-        <button onClick={() => { setActiveTab('current'); setSelectedArchiveMonth(null); }} className={`flex flex-col items-center gap-1 ${activeTab === 'current' ? 'text-indigo-600' : 'text-slate-300'}`}>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-          <span className="text-[8px] font-black uppercase">Planer</span>
+      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-white/80 backdrop-blur-md border border-slate-200 p-2 rounded-[2rem] flex items-center gap-2 shadow-2xl z-50">
+        <button 
+          onClick={() => { setActiveTab('current'); setSelectedArchiveMonth(null); }} 
+          className={`flex items-center gap-2 px-6 py-3 rounded-full transition-all ${activeTab === 'current' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'text-slate-400 hover:text-slate-600'}`}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          <span className="text-xs font-black uppercase">Planer</span>
         </button>
-        <button onClick={() => { setActiveTab('yearly'); setSelectedArchiveMonth(null); }} className={`flex flex-col items-center gap-1 ${activeTab === 'yearly' ? 'text-indigo-600' : 'text-slate-300'}`}>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          <span className="text-[8px] font-black uppercase">Archiv</span>
+        <button 
+          onClick={() => { setActiveTab('yearly'); setSelectedArchiveMonth(null); }} 
+          className={`flex items-center gap-2 px-6 py-3 rounded-full transition-all ${activeTab === 'yearly' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'text-slate-400 hover:text-slate-600'}`}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span className="text-xs font-black uppercase">Archiv</span>
         </button>
       </nav>
     </div>
@@ -278,68 +356,130 @@ const App = () => {
 
 // UI Hilfs-Komponenten
 const InputRow = ({ label, val, set }) => (
-  <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl">
-    <span className="text-[10px] font-bold text-slate-400 uppercase">{label}</span>
-    <input type="number" value={val} onChange={e => set(e.target.value)} className="bg-transparent text-right font-black w-24 outline-none text-sm" placeholder="0" />
-  </div>
-);
-
-const CostBox = ({ title, items, setItems, onFile, onView }) => (
-  <div className="bg-white rounded-2xl p-4 border border-slate-200">
-    <h3 className="text-[10px] font-black uppercase text-slate-400 mb-3">{title}</h3>
-    <div className="space-y-2">
-      {items.map((item, i) => (
-        <div key={i} className="p-3 bg-slate-50 rounded-xl space-y-2">
-          <div className="flex justify-between items-center">
-            <input value={item.name} onChange={e => { const n = [...items]; n[i].name = e.target.value; setItems(n); }} className="bg-transparent text-[11px] font-bold outline-none flex-grow" placeholder="Name" />
-            <input type="number" value={item.amount} onChange={e => { const n = [...items]; n[i].amount = e.target.value; setItems(n); }} className="bg-transparent text-right font-black w-20 outline-none text-[11px]" placeholder="0" />
-          </div>
-          <div className="flex justify-between pt-1 border-t border-slate-200/50">
-            <div className="flex gap-2">
-              <label className="cursor-pointer">
-                <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300'}><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/></svg>
-              </label>
-              {item.receipt && <button onClick={() => onView(item.receipt)} className="text-[8px] font-black text-indigo-500 uppercase">Beleg sehen</button>}
-            </div>
-            <button onClick={() => { const n = [...items]; n.splice(i, 1); setItems(n); }} className="text-slate-300 hover:text-red-500">
-               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            </button>
-          </div>
-        </div>
-      ))}
-      <button onClick={() => setItems([...items, {name: '', amount: '', receipt: null}])} className="w-full py-2 text-[9px] font-black text-slate-400 border border-dashed rounded-xl uppercase hover:bg-slate-50 transition-colors">+ Hinzufügen</button>
+  <div className="flex justify-between items-center bg-slate-50 px-4 py-3 rounded-2xl border border-slate-100">
+    <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">{label}</span>
+    <div className="flex items-center gap-1 font-black text-slate-800">
+        <span className="text-xs opacity-30">CHF</span>
+        <input 
+          type="number" 
+          value={val} 
+          onChange={e => set(e.target.value)} 
+          className="bg-transparent text-right w-24 outline-none text-sm" 
+          placeholder="0.00" 
+        />
     </div>
   </div>
 );
 
-const ArchiveList = ({ title, list, isEdit, onUpdate, onFile, onView }) => (
-  <div>
-    <h4 className="text-[9px] font-black text-slate-400 uppercase border-b pb-1 mb-2">{title}</h4>
-    <div className="space-y-1">
-      {list?.map((item, i) => (
-        <div key={i} className="flex items-center justify-between py-1 border-b border-slate-50 last:border-0">
-          <div className="flex items-center gap-2 flex-grow">
-            {isEdit ? (
-              <input value={item.name} onChange={e => onUpdate(i, 'name', e.target.value)} className="bg-slate-100 text-[10px] font-bold p-1 rounded outline-none" />
-            ) : (
-              <span className="text-[10px] font-bold">{item.name}</span>
-            )}
-            <div className="flex gap-2 items-center">
-              <label className="cursor-pointer">
-                <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300'}><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/></svg>
-              </label>
-              {item.receipt && <button onClick={() => onView(item.receipt)} className="text-[8px] font-black text-indigo-500 uppercase">Beleg</button>}
+const CostBox = ({ title, items, setItems, onFile, onView, color }) => {
+  const colorClass = color === 'indigo' ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-rose-50 border-rose-100 text-rose-600';
+  const dotClass = color === 'indigo' ? 'bg-indigo-400' : 'bg-rose-400';
+
+  return (
+    <section className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
+      <h3 className="text-xs font-black uppercase text-slate-400 mb-5 flex items-center gap-2">
+        <span className={`w-1.5 h-4 ${dotClass} rounded-full`}></span> {title}
+      </h3>
+      <div className="space-y-3">
+        {items.map((item, i) => (
+          <div key={i} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+            <div className="flex justify-between items-center gap-4">
+              <input 
+                value={item.name} 
+                onChange={e => { const n = [...items]; n[i].name = e.target.value; setItems(n); }} 
+                className="bg-transparent text-[12px] font-bold outline-none flex-grow text-slate-700" 
+                placeholder="Bezeichnung..." 
+              />
+              <div className="flex items-center gap-1 font-black">
+                <span className="text-[10px] opacity-20 uppercase">CHF</span>
+                <input 
+                  type="number" 
+                  value={item.amount} 
+                  onChange={e => { const n = [...items]; n[i].amount = e.target.value; setItems(n); }} 
+                  className="bg-transparent text-right w-20 outline-none text-xs" 
+                  placeholder="0.00" 
+                />
+              </div>
+            </div>
+            <div className="flex justify-between items-center pt-2 border-t border-slate-200/50">
+              <div className="flex items-center gap-3">
+                <label className="cursor-pointer group flex items-center gap-1.5">
+                  <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300 group-hover:text-slate-500'}>
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
+                  </svg>
+                  <span className={`text-[9px] font-black uppercase ${item.receipt ? 'text-emerald-600' : 'text-slate-300'}`}>
+                    {item.receipt ? 'Beleg OK' : 'Scan'}
+                  </span>
+                </label>
+                {item.receipt && (
+                    <button onClick={() => onView(item.receipt)} className="text-[9px] font-black text-indigo-500 uppercase underline-offset-2 underline">Vorschau</button>
+                )}
+              </div>
+              <button onClick={() => { const n = [...items]; n.splice(i, 1); setItems(n); }} className="text-slate-300 hover:text-rose-500 transition-colors p-1">
+                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
             </div>
           </div>
-          {isEdit ? (
-            <input type="number" value={item.amount} onChange={e => onUpdate(i, 'amount', e.target.value)} className="bg-slate-100 text-[10px] font-black p-1 rounded w-16 text-right outline-none" />
-          ) : (
-            <span className="text-[10px] font-black">{formatCurrency(item.amount)}</span>
-          )}
+        ))}
+        <button 
+          onClick={() => setItems([...items, {name: '', amount: '', receipt: null}])} 
+          className="w-full py-4 text-[10px] font-black text-slate-400 border-2 border-dashed border-slate-100 rounded-2xl uppercase hover:bg-slate-50 hover:border-slate-200 transition-all"
+        >
+          + Neue Zeile hinzufügen
+        </button>
+      </div>
+    </section>
+  );
+};
+
+const ArchiveList = ({ title, list, isEdit, onUpdate, onFile, onView }) => (
+  <div className="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-200 pb-2 mb-3">{title}</h4>
+    <div className="space-y-3">
+      {list?.length > 0 ? list.map((item, i) => (
+        <div key={i} className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-3 flex-grow min-w-0">
+            {isEdit ? (
+              <input 
+                value={item.name} 
+                onChange={e => onUpdate(i, 'name', e.target.value)} 
+                className="bg-white border border-slate-200 text-[11px] font-bold p-2 rounded-lg outline-none w-full" 
+              />
+            ) : (
+              <span className="text-xs font-bold text-slate-700 truncate">{item.name}</span>
+            )}
+            
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="cursor-pointer">
+                <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300'}>
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                </svg>
+              </label>
+              {item.receipt && (
+                  <button onClick={() => onView(item.receipt)} className="text-[9px] font-black text-indigo-500 uppercase">Vorschau</button>
+              )}
+            </div>
+          </div>
+          
+          <div className="shrink-0">
+            {isEdit ? (
+              <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg p-1 px-2">
+                <span className="text-[9px] opacity-30">CHF</span>
+                <input 
+                  type="number" 
+                  value={item.amount} 
+                  onChange={e => onUpdate(i, 'amount', e.target.value)} 
+                  className="text-xs font-black w-16 text-right outline-none" 
+                />
+              </div>
+            ) : (
+              <span className="text-xs font-black text-slate-900">{formatCurrency(item.amount)}</span>
+            )}
+          </div>
         </div>
-      ))}
+      )) : <p className="text-[10px] text-slate-400 italic">Keine Einträge</p>}
     </div>
   </div>
 );
