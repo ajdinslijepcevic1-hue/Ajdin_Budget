@@ -1,487 +1,220 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Budget Pro - Web Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+        @media print { .no-print { display: none; } }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen pb-24">
 
-// Firebase Konfiguration
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const auth = getAuth(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'budget-pro-app';
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-const formatCurrency = (val) => new Intl.NumberFormat('de-CH', { 
-  style: 'currency', 
-  currency: 'CHF',
-  minimumFractionDigits: 2 
-}).format(val || 0);
-
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('current'); 
-  const [loading, setLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [selectedArchiveMonth, setSelectedArchiveMonth] = useState(null);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [selectedReceipt, setSelectedReceipt] = useState(null);
-
-  // State für Daten mit deinen Fixkosten aus dem Screenshot
-  const [income, setIncome] = useState({ me: '0', spouse: '0', other: '0' });
-  const [fixedCosts, setFixedCosts] = useState([
-    { name: 'Miete', amount: '2402' },
-    { name: 'Auto', amount: '665' },
-    { name: 'swisscom', amount: '179.80' },
-    { name: 'Spende', amount: '10' },
-    { name: 'Diganti', amount: '400' },
-    { name: 'Lebensmittel', amount: '1500' },
-    { name: 'Ajdin', amount: '350' },
-    { name: '3. Säule', amount: '300' },
-    { name: 'Krankenkasse Ajdin', amount: '165.45' },
-    { name: 'Krankenkasse Elma', amount: '369.05' },
-    { name: 'MediaMarkt', amount: '60' },
-    { name: 'Leistungsabrechnung CSS', amount: '0' },
-    { name: 'Steuer', amount: '99.60' }
-  ]);
-  const [variableCosts, setVariableCosts] = useState([]);
-  const [history, setHistory] = useState([]);
-
-  // Auth Logic
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (initialAuthToken) await signInWithCustomToken(auth, initialAuthToken);
-        else await signInAnonymously(auth);
-      } catch (e) { console.error("Auth error", e); }
-    };
-    initAuth();
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-    });
-    return () => unsub();
-  }, []);
-
-  // Sync Logic
-  useEffect(() => {
-    if (!user) return;
-    const configRef = doc(db, 'artifacts', appId, 'users', user.uid, 'budgetConfig', 'currentMonth');
-    const unsubConfig = onSnapshot(configRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.income) setIncome(data.income);
-        if (data.fixedCosts) setFixedCosts(data.fixedCosts);
-        if (data.variableCosts) setVariableCosts(data.variableCosts);
-      }
-      setLoading(false);
-    }, (err) => {
-        console.error("Firestore Error:", err);
-        setLoading(false);
-    });
-
-    const historyRef = collection(db, 'artifacts', appId, 'users', user.uid, 'monthlyBudgets');
-    const unsubHistory = onSnapshot(historyRef, (snap) => {
-      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setHistory(docs.sort((a, b) => b.id.localeCompare(a.id)));
-    });
-
-    return () => { unsubConfig(); unsubHistory(); };
-  }, [user]);
-
-  // Auto-Save für den aktuellen Planer
-  useEffect(() => {
-    if (!user || loading || activeTab !== 'current') return;
-    const timer = setTimeout(async () => {
-      setIsSaving(true);
-      try {
-        const configRef = doc(db, 'artifacts', appId, 'users', user.uid, 'budgetConfig', 'currentMonth');
-        await setDoc(configRef, { income, fixedCosts, variableCosts }, { merge: true });
-      } catch (e) { console.error("Save error", e); }
-      setIsSaving(false);
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [income, fixedCosts, variableCosts, user, loading, activeTab]);
-
-  const calcTotals = (inc, fix, vari) => {
-    const totalInc = Object.values(inc || {}).reduce((a, b) => a + Number(b || 0), 0);
-    const totalFix = (fix || []).reduce((a, b) => a + Number(b.amount || 0), 0);
-    const totalVari = (vari || []).reduce((a, b) => a + Number(b.amount || 0), 0);
-    const totalExp = totalFix + totalVari;
-    return { totalInc, totalFix, totalVari, totalExp, saved: totalInc - totalExp };
-  };
-
-  const totals = useMemo(() => calcTotals(income, fixedCosts, variableCosts), [income, fixedCosts, variableCosts]);
-
-  const handleFile = (e, index, type, isArchived = false) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = reader.result;
-      if (isArchived) {
-        const updated = JSON.parse(JSON.stringify(selectedArchiveMonth));
-        if (type === 'fixed') updated.fixedCostsSnapshot[index].receipt = base64;
-        else updated.variableCostsSnapshot[index].receipt = base64;
-        setSelectedArchiveMonth(updated);
-      } else {
-        if (type === 'fixed') {
-          const newList = [...fixedCosts]; newList[index].receipt = base64; setFixedCosts(newList);
-        } else {
-          const newList = [...variableCosts]; newList[index].receipt = base64; setVariableCosts(newList);
-        }
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const saveArchiveEdit = async () => {
-    if (!user || !selectedArchiveMonth) return;
-    const t = calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot);
-    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'monthlyBudgets', selectedArchiveMonth.id);
-    await updateDoc(docRef, {
-      ...selectedArchiveMonth,
-      totalIncome: t.totalInc,
-      totalFixedCosts: t.totalFix,
-      totalVariableCosts: t.totalVari,
-      totalExpenses: t.totalExp,
-      savedAmount: t.saved
-    });
-    setIsEditMode(false);
-  };
-
-  const finalizeMonth = async () => {
-    if (!user) return;
-    const now = new Date();
-    const id = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getTime()}`;
-    const name = new Intl.DateTimeFormat('de-CH', { month: 'long', year: 'numeric' }).format(now);
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'monthlyBudgets', id), {
-      id, month: name, ...totals,
-      incomeSnapshot: income, fixedCostsSnapshot: fixedCosts, variableCostsSnapshot: variableCosts,
-      timestamp: new Date()
-    });
-    setVariableCosts([]);
-    alert("Monat erfolgreich archiviert!");
-  };
-
-  if (loading) return (
-    <div className="flex items-center justify-center min-h-screen font-sans">
-      <div className="text-center space-y-4">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
-        <p className="font-bold text-slate-500">Budget Pro wird geladen...</p>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
-      {/* App Header */}
-      <header className="bg-white border-b sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
+    <!-- Header -->
+    <header class="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex justify-between items-center no-print">
         <div>
-          <h1 className="text-xl font-black tracking-tighter text-indigo-600">BUDGET PRO</h1>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${isSaving ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`}></div>
-            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">
-              {isSaving ? 'Speichert...' : 'Cloud Synchronisiert'}
-            </p>
-          </div>
+            <h1 class="text-xl font-black tracking-tighter text-indigo-600">BUDGET PRO</h1>
+            <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Web-Sychronisiert</p>
         </div>
-        <button onClick={() => window.print()} className="p-2.5 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors">
-           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        <button onclick="window.print()" class="p-2 bg-slate-100 rounded-lg hover:bg-slate-200">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
         </button>
-      </header>
+    </header>
 
-      <main className="max-w-2xl mx-auto p-4 space-y-6">
-        {activeTab === 'current' && !selectedArchiveMonth && (
-          <>
-            {/* Dashboard Karte */}
-            <div className="bg-indigo-600 text-white p-8 rounded-[2.5rem] shadow-2xl shadow-indigo-200 relative overflow-hidden">
-              <div className="relative z-10">
-                <p className="text-xs font-bold opacity-70 uppercase tracking-[0.2em] mb-1">Verfügbarer Rest</p>
-                <h2 className="text-4xl font-black mb-6">{formatCurrency(totals.saved)}</h2>
-                <div className="grid grid-cols-2 gap-4 pt-6 border-t border-white/20">
-                  <div>
-                    <p className="text-[10px] uppercase font-bold opacity-60">Einnahmen</p>
-                    <p className="font-bold text-sm">{formatCurrency(totals.totalInc)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] uppercase font-bold opacity-60">Gesamtausgaben</p>
-                    <p className="font-bold text-sm">{formatCurrency(totals.totalExp)}</p>
-                  </div>
-                </div>
-              </div>
-              <div className="absolute top-[-20%] right-[-10%] w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
-            </div>
-
-            {/* Einnahmen */}
-            <section className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
-               <h3 className="text-xs font-black uppercase text-slate-400 mb-4 flex items-center gap-2">
-                 <span className="w-1.5 h-4 bg-emerald-400 rounded-full"></span> Einnahmen
-               </h3>
-               <div className="space-y-3">
-                  <InputRow label="Mein Lohn" val={income.me} set={v => setIncome({...income, me: v})} />
-                  <InputRow label="Partner" val={income.spouse} set={v => setIncome({...income, spouse: v})} />
-                  <InputRow label="Sonstiges" val={income.other} set={v => setIncome({...income, other: v})} />
-               </div>
-            </section>
-
-            {/* Ausgaben Sektionen */}
-            <CostBox title="Fixkosten" items={fixedCosts} setItems={setFixedCosts} onFile={(e, i) => handleFile(e, i, 'fixed')} onView={setSelectedReceipt} color="indigo" />
-            <CostBox title="Variable Ausgaben" items={variableCosts} setItems={setVariableCosts} onFile={(e, i) => handleFile(e, i, 'variable')} onView={setSelectedReceipt} color="rose" />
-
-            <button onClick={finalizeMonth} className="w-full bg-slate-900 text-white py-5 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-transform">
-              Monat abschliessen & Archivieren
-            </button>
-          </>
-        )}
-
-        {activeTab === 'yearly' && !selectedArchiveMonth && (
-          <div className="space-y-4">
-            <h2 className="text-xl font-black px-2">Verlauf</h2>
-            {history.length === 0 ? (
-                <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-300">
-                    <p className="text-slate-400 font-bold">Noch keine archivierten Monate.</p>
-                </div>
-            ) : (
-                history.map(m => (
-                    <div key={m.id} onClick={() => setSelectedArchiveMonth(m)} className="bg-white p-5 rounded-2xl border border-slate-200 flex justify-between items-center cursor-pointer hover:border-indigo-500 hover:shadow-md transition-all group">
-                      <div>
-                        <h4 className="font-black text-slate-800 group-hover:text-indigo-600 transition-colors">{m.month}</h4>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ausgaben: {formatCurrency(m.totalExpenses)}</p>
-                      </div>
-                      <div className="text-right">
-                        <span className={`text-base font-black ${m.savedAmount >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{formatCurrency(m.savedAmount)}</span>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Bilanz</p>
-                      </div>
+    <main id="app" class="max-w-2xl mx-auto p-4 space-y-6">
+        <!-- Dashboard -->
+        <div class="bg-indigo-600 text-white p-8 rounded-[2rem] shadow-xl shadow-indigo-100 relative overflow-hidden">
+            <div class="relative z-10">
+                <p class="text-[10px] font-bold opacity-70 uppercase tracking-widest mb-1">Verfügbares Budget</p>
+                <h2 id="display-saved" class="text-4xl font-black mb-6">CHF 0.00</h2>
+                <div class="grid grid-cols-2 gap-4 pt-4 border-t border-white/20">
+                    <div>
+                        <p class="text-[10px] uppercase font-bold opacity-60">Einnahmen</p>
+                        <p id="display-inc" class="font-bold text-sm">CHF 0.00</p>
                     </div>
-                  ))
-            )}
-          </div>
-        )}
+                    <div class="text-right">
+                        <p class="text-[10px] uppercase font-bold opacity-60">Ausgaben</p>
+                        <p id="display-exp" class="font-bold text-sm">CHF 0.00</p>
+                    </div>
+                </div>
+            </div>
+            <div class="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
+        </div>
 
-        {/* Archiv Detailansicht */}
-        {selectedArchiveMonth && (
-          <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div className="flex justify-between items-center">
-              <button onClick={() => { setSelectedArchiveMonth(null); setIsEditMode(false); }} className="px-4 py-2 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-500 hover:bg-slate-200">← Zurück</button>
-              <div className="flex gap-2">
-                <button onClick={() => setIsEditMode(!isEditMode)} className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-black uppercase">
-                    {isEditMode ? 'Abbrechen' : 'Bearbeiten'}
-                </button>
-                {isEditMode && (
-                    <button onClick={saveArchiveEdit} className="px-4 py-2 bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-100">
-                        Speichern
+        <!-- Einnahmen -->
+        <section class="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+            <h3 class="text-xs font-black uppercase text-slate-400 mb-4">Einnahmen</h3>
+            <div class="space-y-2">
+                <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl">
+                    <span class="text-xs font-bold text-slate-500">Mein Lohn</span>
+                    <input type="number" id="inc-me" value="0" oninput="updateAll()" class="bg-transparent text-right font-black w-24 outline-none">
+                </div>
+                <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl">
+                    <span class="text-xs font-bold text-slate-500">Partner</span>
+                    <input type="number" id="inc-spouse" value="0" oninput="updateAll()" class="bg-transparent text-right font-black w-24 outline-none">
+                </div>
+            </div>
+        </section>
+
+        <!-- Fixkosten -->
+        <section class="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xs font-black uppercase text-slate-400">Fixkosten</h3>
+                <span class="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded">Monatlich</span>
+            </div>
+            <div id="fixed-costs-container" class="space-y-3">
+                <!-- Wird per JS befüllt -->
+            </div>
+            <button onclick="addRow('fixed')" class="w-full mt-4 py-3 border-2 border-dashed border-slate-100 rounded-xl text-[10px] font-bold text-slate-400 uppercase hover:bg-slate-50 transition-all">
+                + Zeile hinzufügen
+            </button>
+        </section>
+
+        <!-- Variable Kosten -->
+        <section class="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+            <h3 class="text-xs font-black uppercase text-slate-400 mb-4">Variable Ausgaben</h3>
+            <div id="variable-costs-container" class="space-y-3">
+                <!-- Wird per JS befüllt -->
+            </div>
+            <button onclick="addRow('variable')" class="w-full mt-4 py-3 border-2 border-dashed border-slate-100 rounded-xl text-[10px] font-bold text-slate-400 uppercase hover:bg-slate-50 transition-all">
+                + Ausgabe hinzufügen
+            </button>
+        </section>
+
+        <button onclick="finalize()" class="w-full bg-slate-900 text-white py-4 rounded-xl font-black text-xs uppercase tracking-widest no-print">
+            Monat Archivieren
+        </button>
+    </main>
+
+    <script>
+        // Initial-Daten exakt wie auf deinem Screenshot
+        let state = {
+            income: { me: 5500, spouse: 0 },
+            fixedCosts: [
+                { name: 'Miete', amount: 2402 },
+                { name: 'Auto', amount: 665 },
+                { name: 'swisscom', amount: 179.80 },
+                { name: 'Spende', amount: 10 },
+                { name: 'Diganti', amount: 400 },
+                { name: 'Lebensmittel', amount: 1500 },
+                { name: 'Ajdin', amount: 350 },
+                { name: '3. Säule', amount: 300 },
+                { name: 'Krankenkasse Ajdin', amount: 165.45 },
+                { name: 'Krankenkasse Elma', amount: 369.05 },
+                { name: 'MediaMarkt', amount: 60 },
+                { name: 'Leistungsabrechnung CSS', amount: 0 },
+                { name: 'Steuer', amount: 99.60 }
+            ],
+            variableCosts: []
+        };
+
+        function formatCHF(val) {
+            return new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF' }).format(val);
+        }
+
+        function renderCosts() {
+            const fixedCont = document.getElementById('fixed-costs-container');
+            fixedCont.innerHTML = '';
+            state.fixedCosts.forEach((item, i) => {
+                fixedCont.appendChild(createCostRow(item, i, 'fixed'));
+            });
+
+            const variCont = document.getElementById('variable-costs-container');
+            variCont.innerHTML = '';
+            state.variableCosts.forEach((item, i) => {
+                variCont.appendChild(createCostRow(item, i, 'variable'));
+            });
+        }
+
+        function createCostRow(item, index, type) {
+            const div = document.createElement('div');
+            div.className = 'flex flex-col p-3 bg-slate-50 rounded-xl border border-slate-100';
+            div.innerHTML = `
+                <div class="flex justify-between items-center gap-2 mb-2">
+                    <input type="text" value="${item.name}" onchange="updateItem('${type}', ${index}, 'name', this.value)" 
+                           class="bg-transparent text-xs font-bold outline-none flex-grow" placeholder="Bezeichnung">
+                    <div class="flex items-center gap-1 font-black">
+                        <span class="text-[10px] opacity-20 uppercase">CHF</span>
+                        <input type="number" value="${item.amount}" oninput="updateItem('${type}', ${index}, 'amount', this.value)" 
+                               class="bg-transparent text-right w-20 outline-none text-xs">
+                    </div>
+                </div>
+                <div class="flex justify-between items-center">
+                    <div class="flex gap-4">
+                        <label class="cursor-pointer flex items-center gap-1">
+                            <input type="file" class="hidden" onchange="handleFile(event, '${type}', ${index})">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${item.receipt ? '#10b981' : '#cbd5e1'}" stroke-width="3"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                            <span class="text-[9px] font-bold uppercase ${item.receipt ? 'text-emerald-500' : 'text-slate-300'}">${item.receipt ? 'Beleg OK' : 'Scan'}</span>
+                        </label>
+                    </div>
+                    <button onclick="removeRow('${type}', ${index})" class="text-slate-300 hover:text-rose-500">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg>
                     </button>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <h2 className="text-3xl font-black tracking-tighter italic text-slate-800">{selectedArchiveMonth.month}</h2>
-              <div className="grid grid-cols-2 gap-3 mt-6">
-                <div className="bg-emerald-50 p-4 rounded-2xl">
-                  <p className="text-[10px] font-black text-emerald-600 uppercase mb-1">Gespart</p>
-                  <p className="text-lg font-black text-emerald-700">
-                    {formatCurrency(calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).saved)}
-                  </p>
                 </div>
-                <div className="bg-rose-50 p-4 rounded-2xl">
-                  <p className="text-[10px] font-black text-rose-600 uppercase mb-1">Ausgaben</p>
-                  <p className="text-lg font-black text-rose-700">
-                    {formatCurrency(calcTotals(selectedArchiveMonth.incomeSnapshot, selectedArchiveMonth.fixedCostsSnapshot, selectedArchiveMonth.variableCostsSnapshot).totalExp)}
-                  </p>
-                </div>
-              </div>
-            </div>
+            `;
+            return div;
+        }
 
-            <div className="space-y-6">
-               <ArchiveList 
-                 title="Fixkosten Detail" 
-                 list={selectedArchiveMonth.fixedCostsSnapshot} 
-                 isEdit={isEditMode} 
-                 onUpdate={(i, k, v) => {
-                    const upd = JSON.parse(JSON.stringify(selectedArchiveMonth));
-                    upd.fixedCostsSnapshot[i][k] = v;
-                    setSelectedArchiveMonth(upd);
-                 }} 
-                 onFile={(e, i) => handleFile(e, i, 'fixed', true)} 
-                 onView={setSelectedReceipt} 
-               />
-               
-               <ArchiveList 
-                 title="Variable Kosten Detail" 
-                 list={selectedArchiveMonth.variableCostsSnapshot} 
-                 isEdit={isEditMode} 
-                 onUpdate={(i, k, v) => {
-                    const upd = JSON.parse(JSON.stringify(selectedArchiveMonth));
-                    upd.variableCostsSnapshot[i][k] = v;
-                    setSelectedArchiveMonth(upd);
-                 }} 
-                 onFile={(e, i) => handleFile(e, i, 'variable', true)} 
-                 onView={setSelectedReceipt} 
-               />
-            </div>
-          </div>
-        )}
-      </main>
+        function updateItem(type, index, key, value) {
+            const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
+            list[index][key] = key === 'amount' ? parseFloat(value) || 0 : value;
+            updateAll();
+        }
 
-      {/* Beleg Viewer */}
-      {selectedReceipt && (
-        <div className="fixed inset-0 bg-slate-900/95 z-[100] flex items-center justify-center p-6 backdrop-blur-sm" onClick={() => setSelectedReceipt(null)}>
-          <div className="relative max-w-full max-h-full">
-            <img src={selectedReceipt} className="max-w-full max-h-[85vh] rounded-2xl shadow-2xl border-4 border-white/10" alt="Beleg-Vorschau" />
-            <button className="absolute -top-12 right-0 text-white font-black uppercase text-xs">Schliessen ✕</button>
-          </div>
-        </div>
-      )}
+        function addRow(type) {
+            const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
+            list.push({ name: '', amount: 0, receipt: null });
+            renderCosts();
+            updateAll();
+        }
 
-      {/* Navigation */}
-      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-white/80 backdrop-blur-md border border-slate-200 p-2 rounded-[2rem] flex items-center gap-2 shadow-2xl z-50">
-        <button 
-          onClick={() => { setActiveTab('current'); setSelectedArchiveMonth(null); }} 
-          className={`flex items-center gap-2 px-6 py-3 rounded-full transition-all ${activeTab === 'current' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'text-slate-400 hover:text-slate-600'}`}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-          <span className="text-xs font-black uppercase">Planer</span>
-        </button>
-        <button 
-          onClick={() => { setActiveTab('yearly'); setSelectedArchiveMonth(null); }} 
-          className={`flex items-center gap-2 px-6 py-3 rounded-full transition-all ${activeTab === 'yearly' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'text-slate-400 hover:text-slate-600'}`}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          <span className="text-xs font-black uppercase">Archiv</span>
-        </button>
-      </nav>
-    </div>
-  );
-};
+        function removeRow(type, index) {
+            const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
+            list.splice(index, 1);
+            renderCosts();
+            updateAll();
+        }
 
-// UI Hilfs-Komponenten
-const InputRow = ({ label, val, set }) => (
-  <div className="flex justify-between items-center bg-slate-50 px-4 py-3 rounded-2xl border border-slate-100">
-    <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">{label}</span>
-    <div className="flex items-center gap-1 font-black text-slate-800">
-        <span className="text-xs opacity-30">CHF</span>
-        <input 
-          type="number" 
-          value={val} 
-          onChange={e => set(e.target.value)} 
-          className="bg-transparent text-right w-24 outline-none text-sm" 
-          placeholder="0.00" 
-        />
-    </div>
-  </div>
-);
+        function handleFile(e, type, index) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
+                list[index].receipt = event.target.result;
+                renderCosts();
+            };
+            reader.readAsDataURL(file);
+        }
 
-const CostBox = ({ title, items, setItems, onFile, onView, color }) => {
-  const colorClass = color === 'indigo' ? 'bg-indigo-50 border-indigo-100 text-indigo-600' : 'bg-rose-50 border-rose-100 text-rose-600';
-  const dotClass = color === 'indigo' ? 'bg-indigo-400' : 'bg-rose-400';
+        function updateAll() {
+            const incMe = parseFloat(document.getElementById('inc-me').value) || 0;
+            const incSpouse = parseFloat(document.getElementById('inc-spouse').value) || 0;
+            const totalInc = incMe + incSpouse;
 
-  return (
-    <section className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
-      <h3 className="text-xs font-black uppercase text-slate-400 mb-5 flex items-center gap-2">
-        <span className={`w-1.5 h-4 ${dotClass} rounded-full`}></span> {title}
-      </h3>
-      <div className="space-y-3">
-        {items.map((item, i) => (
-          <div key={i} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
-            <div className="flex justify-between items-center gap-4">
-              <input 
-                value={item.name} 
-                onChange={e => { const n = [...items]; n[i].name = e.target.value; setItems(n); }} 
-                className="bg-transparent text-[12px] font-bold outline-none flex-grow text-slate-700" 
-                placeholder="Bezeichnung..." 
-              />
-              <div className="flex items-center gap-1 font-black">
-                <span className="text-[10px] opacity-20 uppercase">CHF</span>
-                <input 
-                  type="number" 
-                  value={item.amount} 
-                  onChange={e => { const n = [...items]; n[i].amount = e.target.value; setItems(n); }} 
-                  className="bg-transparent text-right w-20 outline-none text-xs" 
-                  placeholder="0.00" 
-                />
-              </div>
-            </div>
-            <div className="flex justify-between items-center pt-2 border-t border-slate-200/50">
-              <div className="flex items-center gap-3">
-                <label className="cursor-pointer group flex items-center gap-1.5">
-                  <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300 group-hover:text-slate-500'}>
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
-                  </svg>
-                  <span className={`text-[9px] font-black uppercase ${item.receipt ? 'text-emerald-600' : 'text-slate-300'}`}>
-                    {item.receipt ? 'Beleg OK' : 'Scan'}
-                  </span>
-                </label>
-                {item.receipt && (
-                    <button onClick={() => onView(item.receipt)} className="text-[9px] font-black text-indigo-500 uppercase underline-offset-2 underline">Vorschau</button>
-                )}
-              </div>
-              <button onClick={() => { const n = [...items]; n.splice(i, 1); setItems(n); }} className="text-slate-300 hover:text-rose-500 transition-colors p-1">
-                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M18 6L6 18M6 6l12 12"/></svg>
-              </button>
-            </div>
-          </div>
-        ))}
-        <button 
-          onClick={() => setItems([...items, {name: '', amount: '', receipt: null}])} 
-          className="w-full py-4 text-[10px] font-black text-slate-400 border-2 border-dashed border-slate-100 rounded-2xl uppercase hover:bg-slate-50 hover:border-slate-200 transition-all"
-        >
-          + Neue Zeile hinzufügen
-        </button>
-      </div>
-    </section>
-  );
-};
+            const totalFixed = state.fixedCosts.reduce((sum, item) => sum + (item.amount || 0), 0);
+            const totalVari = state.variableCosts.reduce((sum, item) => sum + (item.amount || 0), 0);
+            const totalExp = totalFixed + totalVari;
 
-const ArchiveList = ({ title, list, isEdit, onUpdate, onFile, onView }) => (
-  <div className="bg-slate-50 p-5 rounded-2xl border border-slate-100">
-    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-200 pb-2 mb-3">{title}</h4>
-    <div className="space-y-3">
-      {list?.length > 0 ? list.map((item, i) => (
-        <div key={i} className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-3 flex-grow min-w-0">
-            {isEdit ? (
-              <input 
-                value={item.name} 
-                onChange={e => onUpdate(i, 'name', e.target.value)} 
-                className="bg-white border border-slate-200 text-[11px] font-bold p-2 rounded-lg outline-none w-full" 
-              />
-            ) : (
-              <span className="text-xs font-bold text-slate-700 truncate">{item.name}</span>
-            )}
-            
-            <div className="flex items-center gap-2 shrink-0">
-              <label className="cursor-pointer">
-                <input type="file" className="hidden" accept="image/*" onChange={e => onFile(e, i)} />
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={item.receipt ? 'text-emerald-500' : 'text-slate-300'}>
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                </svg>
-              </label>
-              {item.receipt && (
-                  <button onClick={() => onView(item.receipt)} className="text-[9px] font-black text-indigo-500 uppercase">Vorschau</button>
-              )}
-            </div>
-          </div>
-          
-          <div className="shrink-0">
-            {isEdit ? (
-              <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg p-1 px-2">
-                <span className="text-[9px] opacity-30">CHF</span>
-                <input 
-                  type="number" 
-                  value={item.amount} 
-                  onChange={e => onUpdate(i, 'amount', e.target.value)} 
-                  className="text-xs font-black w-16 text-right outline-none" 
-                />
-              </div>
-            ) : (
-              <span className="text-xs font-black text-slate-900">{formatCurrency(item.amount)}</span>
-            )}
-          </div>
-        </div>
-      )) : <p className="text-[10px] text-slate-400 italic">Keine Einträge</p>}
-    </div>
-  </div>
-);
+            document.getElementById('display-inc').innerText = formatCHF(totalInc);
+            document.getElementById('display-exp').innerText = formatCHF(totalExp);
+            document.getElementById('display-saved').innerText = formatCHF(totalInc - totalExp);
+        }
 
-export default App;
+        function finalize() {
+            alert("Monat wurde lokal gespeichert. Für Cloud-Speicherung muss Firebase verbunden sein.");
+        }
+
+        // Init
+        window.onload = () => {
+            renderCosts();
+            updateAll();
+        };
+    </script>
+</body>
+</html>
