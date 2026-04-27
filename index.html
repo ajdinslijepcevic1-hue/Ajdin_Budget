@@ -11,15 +11,25 @@
         .no-scrollbar::-webkit-scrollbar { display: none; }
         @media print { .no-print { display: none; } }
         .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
+        .modal.active { display: flex; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen pb-24">
+
+    <!-- Beleg Vorschau Modal -->
+    <div id="receipt-modal" class="modal" onclick="closeModal()">
+        <div class="max-w-4xl max-h-full bg-white p-2 rounded-lg shadow-2xl relative" onclick="event.stopPropagation()">
+            <button onclick="closeModal()" class="absolute -top-10 right-0 text-white font-bold uppercase text-xs tracking-widest">Schliessen [X]</button>
+            <img id="modal-img" src="" class="max-w-full max-h-[85vh] rounded object-contain" alt="Beleg Vorschau">
+        </div>
+    </div>
 
     <!-- Header -->
     <header class="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex justify-between items-center no-print">
         <div>
             <h1 class="text-xl font-black tracking-tighter text-indigo-600 uppercase">BUDGET PRO</h1>
-            <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Lokal Gespeichert</p>
+            <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Automatische Speicherung</p>
         </div>
         <div class="flex gap-2">
             <button onclick="window.print()" class="p-2 bg-slate-100 rounded-lg hover:bg-slate-200">
@@ -63,11 +73,11 @@
                 <div class="space-y-2">
                     <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl">
                         <span class="text-xs font-bold text-slate-500">Mein Lohn</span>
-                        <input type="number" id="inc-me" oninput="updateStateFromUI()" class="bg-transparent text-right font-black w-24 outline-none">
+                        <input type="number" id="inc-me" oninput="saveCurrentState()" class="bg-transparent text-right font-black w-24 outline-none">
                     </div>
                     <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl">
                         <span class="text-xs font-bold text-slate-500">Partner / Sonstiges</span>
-                        <input type="number" id="inc-spouse" oninput="updateStateFromUI()" class="bg-transparent text-right font-black w-24 outline-none">
+                        <input type="number" id="inc-spouse" oninput="saveCurrentState()" class="bg-transparent text-right font-black w-24 outline-none">
                     </div>
                 </div>
             </section>
@@ -108,34 +118,44 @@
     </main>
 
     <script>
-        // Initial-Daten (Default)
+        // Initial-Daten (Standard-Template falls kein Speicher vorhanden)
         const defaultState = {
             id: null,
             monthName: "",
             income: { me: 5500, spouse: 0 },
             fixedCosts: [
-                { name: 'Miete', amount: 2402 },
-                { name: 'Auto', amount: 665 },
-                { name: 'swisscom', amount: 179.80 },
-                { name: 'Spende', amount: 10 },
-                { name: 'Diganti', amount: 400 },
-                { name: 'Lebensmittel', amount: 1500 },
-                { name: 'Ajdin', amount: 350 },
-                { name: '3. Säule', amount: 300 },
-                { name: 'Krankenkasse Ajdin', amount: 165.45 },
-                { name: 'Krankenkasse Elma', amount: 369.05 },
-                { name: 'MediaMarkt', amount: 60 },
-                { name: 'Leistungsabrechnung CSS', amount: 0 },
-                { name: 'Steuer', amount: 99.60 }
+                { name: 'Miete', amount: 2402, receipt: null },
+                { name: 'Auto', amount: 665, receipt: null },
+                { name: 'swisscom', amount: 179.80, receipt: null },
+                { name: 'Spende', amount: 10, receipt: null },
+                { name: 'Diganti', amount: 400, receipt: null },
+                { name: 'Lebensmittel', amount: 1500, receipt: null },
+                { name: 'Ajdin', amount: 350, receipt: null },
+                { name: '3. Säule', amount: 300, receipt: null },
+                { name: 'Krankenkasse Ajdin', amount: 165.45, receipt: null },
+                { name: 'Krankenkasse Elma', amount: 369.05, receipt: null },
+                { name: 'MediaMarkt', amount: 60, receipt: null },
+                { name: 'Leistungsabrechnung CSS', amount: 0, receipt: null },
+                { name: 'Steuer', amount: 99.60, receipt: null }
             ],
             variableCosts: []
         };
 
-        let state = JSON.parse(JSON.stringify(defaultState));
+        // Lade permanenten Speicher oder nutze Standard
+        let state = JSON.parse(localStorage.getItem('budget_current_planner')) || JSON.parse(JSON.stringify(defaultState));
         let archive = JSON.parse(localStorage.getItem('budget_archive')) || [];
 
         function formatCHF(val) {
             return new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF' }).format(val);
+        }
+
+        function saveCurrentState() {
+            // Update Einkommen aus UI
+            state.income.me = parseFloat(document.getElementById('inc-me').value) || 0;
+            state.income.spouse = parseFloat(document.getElementById('inc-spouse').value) || 0;
+            
+            localStorage.setItem('budget_current_planner', JSON.stringify(state));
+            updateCalculations();
         }
 
         function switchTab(tab) {
@@ -182,8 +202,15 @@
             div.className = 'flex flex-col p-3 bg-slate-50 rounded-xl border border-slate-100';
             div.innerHTML = `
                 <div class="flex justify-between items-center gap-2 mb-2">
-                    <input type="text" value="${item.name}" onchange="updateItem('${type}', ${index}, 'name', this.value)" 
-                           class="bg-transparent text-xs font-bold outline-none flex-grow" placeholder="Bezeichnung">
+                    <div class="flex items-center gap-2 flex-grow">
+                        <input type="text" value="${item.name}" onchange="updateItem('${type}', ${index}, 'name', this.value)" 
+                               class="bg-transparent text-xs font-bold outline-none flex-grow" placeholder="Bezeichnung">
+                        ${item.receipt ? `
+                            <button onclick="openModal('${item.receipt}')" class="text-indigo-600 hover:scale-110 transition-transform" title="Beleg ansehen">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </button>
+                        ` : ''}
+                    </div>
                     <div class="flex items-center gap-1 font-black">
                         <span class="text-[10px] opacity-20 uppercase font-bold">CHF</span>
                         <input type="number" value="${item.amount}" oninput="updateItem('${type}', ${index}, 'amount', this.value)" 
@@ -195,7 +222,7 @@
                         <label class="cursor-pointer flex items-center gap-1">
                             <input type="file" class="hidden" onchange="handleFile(event, '${type}', ${index})">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${item.receipt ? '#10b981' : '#cbd5e1'}" stroke-width="3"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                            <span class="text-[9px] font-bold uppercase ${item.receipt ? 'text-emerald-500' : 'text-slate-300'}">${item.receipt ? 'Beleg OK' : 'Scan'}</span>
+                            <span class="text-[9px] font-bold uppercase ${item.receipt ? 'text-emerald-500' : 'text-slate-300'}">${item.receipt ? 'Foto geladen' : 'Foto hochladen'}</span>
                         </label>
                     </div>
                     <button onclick="removeRow('${type}', ${index})" class="text-slate-300 hover:text-rose-500">
@@ -209,29 +236,25 @@
         function updateItem(type, index, key, value) {
             const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
             list[index][key] = key === 'amount' ? parseFloat(value) || 0 : value;
-            updateCalculations();
-        }
-
-        function updateStateFromUI() {
-            state.income.me = parseFloat(document.getElementById('inc-me').value) || 0;
-            state.income.spouse = parseFloat(document.getElementById('inc-spouse').value) || 0;
-            updateCalculations();
+            saveCurrentState();
         }
 
         function addRow(type) {
             const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
             list.push({ name: '', amount: 0, receipt: null });
             renderPlanner();
+            saveCurrentState();
         }
 
         function removeRow(type, index) {
             const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
             list.splice(index, 1);
             renderPlanner();
+            saveCurrentState();
         }
 
         function updateCalculations() {
-            const totalInc = state.income.me + state.income.spouse;
+            const totalInc = (state.income.me || 0) + (state.income.spouse || 0);
             const totalFixed = state.fixedCosts.reduce((sum, item) => sum + (item.amount || 0), 0);
             const totalVari = state.variableCosts.reduce((sum, item) => sum + (item.amount || 0), 0);
             const totalExp = totalFixed + totalVari;
@@ -253,7 +276,6 @@
                 totals: { inc: totalInc, exp: totalExp, saved: totalInc - totalExp }
             };
 
-            // Falls es eine Bearbeitung war, alten Eintrag ersetzen
             const existingIdx = archive.findIndex(a => a.id === entry.id);
             if (existingIdx > -1) {
                 archive[existingIdx] = entry;
@@ -262,10 +284,12 @@
             }
 
             localStorage.setItem('budget_archive', JSON.stringify(archive));
-            alert("Monat erfolgreich im Archiv gespeichert!");
             
-            // Reset Planner
+            // Leere den aktuellen Planer-Speicher nach Archivierung
+            localStorage.removeItem('budget_current_planner');
             state = JSON.parse(JSON.stringify(defaultState));
+            
+            alert("Monat erfolgreich im Archiv gespeichert!");
             renderPlanner();
             switchTab('archive');
         }
@@ -292,10 +316,10 @@
                         </div>
                     </div>
                     <div class="flex gap-2">
-                        <button onclick="loadFromArchive(${item.id})" class="p-2 text-slate-300 hover:text-indigo-600">
+                        <button onclick="loadFromArchive(${item.id})" class="p-2 text-slate-300 hover:text-indigo-600" title="Bearbeiten">
                              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                         </button>
-                        <button onclick="deleteFromArchive(${item.id})" class="p-2 text-slate-300 hover:text-rose-500">
+                        <button onclick="deleteFromArchive(${item.id})" class="p-2 text-slate-300 hover:text-rose-500" title="Löschen">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                     </div>
@@ -327,8 +351,18 @@
                 const list = type === 'fixed' ? state.fixedCosts : state.variableCosts;
                 list[index].receipt = event.target.result;
                 renderPlanner();
+                saveCurrentState();
             };
             reader.readAsDataURL(file);
+        }
+
+        function openModal(imgSrc) {
+            document.getElementById('modal-img').src = imgSrc;
+            document.getElementById('receipt-modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('receipt-modal').classList.remove('active');
         }
 
         // Init
